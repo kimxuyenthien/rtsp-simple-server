@@ -399,6 +399,8 @@ func (s *webRTCServer) authenticate(pa *path, ctx *gin.Context) error {
 	pathUser := pathConf.ReadUser
 	pathPass := pathConf.ReadPass
 
+	s.log(logger.Info, "[HIEUTD] User : '%s', Pass: '%s'", pathUser, pathPass)
+
 	if s.externalAuthenticationURL != "" {
 		ip := net.ParseIP(ctx.ClientIP())
 		user, pass, ok := ctx.Request.BasicAuth()
