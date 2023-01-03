@@ -33,7 +33,7 @@ readBufferCount: 512
 externalAuthenticationURL:
 
 # Enable the HTTP API.
-api: no
+api: yes
 # Address of the API listener.
 apiAddress: 0.0.0.0:9997
 
