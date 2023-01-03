@@ -48,7 +48,7 @@ class Receiver {
         };
 
         this.ws.onopen = (msg) => {
-            console.log("ws open, ",msg);
+            console.log("[HIEUTD] ws open, ",this.ws.id);
         };
 
         this.ws.onclose = () => {
