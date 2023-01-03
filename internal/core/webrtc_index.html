@@ -37,7 +37,7 @@ class Receiver {
 		console.log("connecting");
 
         this.ws = new WebSocket(window.location.href.replace(/^http/, "ws") + 'ws');
-
+        
         this.ws.onerror = () => {
             console.log("ws error");
             if (this.ws === null) {
@@ -45,6 +45,10 @@ class Receiver {
             }
             this.ws.close();
             this.ws = null;
+        };
+
+        this.ws.onopen = (msg) => {
+            console.log("ws open, ",msg);
         };
 
         this.ws.onclose = () => {
