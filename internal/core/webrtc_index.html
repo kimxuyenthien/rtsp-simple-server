@@ -60,6 +60,7 @@ class Receiver {
         if (this.ws === null) {
             return;
         }
+        console.log("[HIEUTD] onIceServers :", msg);
 
         const iceServers = JSON.parse(msg.data);
 
@@ -116,6 +117,7 @@ class Receiver {
     }
 
 	onRemoteDescription(msg) {
+        console.log("[HIEUTD] On remote description, ", msg);
 		if (this.pc === null || this.ws === null) {
 			return;
 		}
