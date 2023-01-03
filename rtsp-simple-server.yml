@@ -35,7 +35,7 @@ externalAuthenticationURL:
 # Enable the HTTP API.
 api: no
 # Address of the API listener.
-apiAddress: 127.0.0.1:9997
+apiAddress: 0.0.0.0:9997
 
 # Enable Prometheus-compatible metrics.
 metrics: no
@@ -334,7 +334,7 @@ paths:
     publishPass: 0qT1ojcd0CTV1j1uEiUuUX227GHHn594pJQUfEpH1p1D7e
     # IPs or networks (x.x.x.x/24) allowed to publish.
     publishIPs: []
-    
+
     # Username required to read.
     # SHA256-hashed values can be inserted with the "sha256:" prefix.
     readUser: admin
