@@ -121,7 +121,7 @@ class Receiver {
     }
 
 	onRemoteDescription(msg) {
-        console.log("[HIEUTD] On remote description, ", msg.data);
+        console.log("[HIEUTD] On remote description msg, ", msg);
 		if (this.pc === null || this.ws === null) {
 			return;
 		}
