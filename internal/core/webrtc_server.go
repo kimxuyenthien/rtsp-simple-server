@@ -252,6 +252,7 @@ outer:
 				s.iceUDPMux,
 				s.iceTCPMux,
 			)
+			s.log(logger.Info, "[HIEUTD] uuid : '%s'", c.uuid.String())
 			s.conns[c] = struct{}{}
 
 		case conn := <-s.chConnClose:
