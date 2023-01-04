@@ -48,7 +48,8 @@ class Receiver {
         };
 
         this.ws.onopen = (msg) => {
-            console.log("[HIEUTD] ws open, ",this.ws);
+            const id = uuidv4();
+            console.log("[HIEUTD] ws open, ",msg);
         };
 
         this.ws.onclose = () => {
