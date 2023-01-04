@@ -57,17 +57,24 @@ class Receiver {
             this.scheduleRestart();
         };
 
+        this.ws.onmessage = (msg) => this.onInitChannel(msg);
         this.ws.onmessage = (msg) => this.onIceServers(msg);
 	}
+
+    onInitChannel(msg){
+        if (this.ws === null) {
+            return;
+        }
+        console.log("[HIEUTD] onInitChannel :", msg.data);
+    }
 
     onIceServers(msg) {
         if (this.ws === null) {
             return;
         }
-        console.log("[HIEUTD] onIceServers :", msg);
-
+        console.log("[HIEUTD] onIceServers :", msg.data);
         const iceServers = JSON.parse(msg.data);
-
+        console.log("[HIEUTD] iceServers :", iceServers);
         this.pc = new RTCPeerConnection({
             iceServers,
         });

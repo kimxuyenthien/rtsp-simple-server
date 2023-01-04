@@ -279,6 +279,15 @@ func (c *webRTCConn) runInner(ctx context.Context) error {
 	c.wsconn.SetReadDeadline(time.Now().Add(handshakeDeadline))
 	c.wsconn.SetWriteDeadline(time.Now().Add(handshakeDeadline))
 
+	c.log(logger.Info, "[HIEUTD] Send channel uuid to client "+c.uuid.String())
+	channelCall := webrtc.ChannelCall{
+		UUID: c.uuid.String(),
+	}
+	err = c.writeCallUUID(channelCall)
+	if err != nil {
+		return err
+	}
+
 	err = c.writeICEServers(c.genICEServers())
 	if err != nil {
 		return err
@@ -784,6 +793,11 @@ func (c *webRTCConn) genICEServers() []webrtc.ICEServer {
 		}
 	}
 	return ret
+}
+
+func (c *webRTCConn) writeCallUUID(uuid webrtc.ChannelCall) error {
+	enc, _ := json.Marshal(uuid)
+	return c.wsconn.WriteMessage(websocket.TextMessage, enc)
 }
 
 func (c *webRTCConn) writeICEServers(iceServers []webrtc.ICEServer) error {
