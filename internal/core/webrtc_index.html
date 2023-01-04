@@ -121,7 +121,7 @@ class Receiver {
 
                 this.pc.setLocalDescription(desc);
 
-                console.log("sending offer");
+                console.log("[HIEUTD] local description, ", desc);
                 this.ws.send(JSON.stringify(desc));
             });
     }
@@ -143,6 +143,7 @@ class Receiver {
 
         if (evt.candidate !== null) {
             if (evt.candidate.candidate !== "") {
+                console.log("[HIEUTD] local candidate, ", evt.candidate);
                 this.ws.send(JSON.stringify(evt.candidate));
             }
         }
