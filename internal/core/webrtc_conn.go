@@ -32,6 +32,10 @@ import (
 	"github.com/aler9/rtsp-simple-server/internal/logger"
 )
 
+type ChannelCall struct {
+	UUID string `json:"uuid"`
+}
+
 const (
 	handshakeDeadline = 10 * time.Second
 )
@@ -280,7 +284,8 @@ func (c *webRTCConn) runInner(ctx context.Context) error {
 	c.wsconn.SetWriteDeadline(time.Now().Add(handshakeDeadline))
 
 	c.log(logger.Info, "[HIEUTD] Send channel uuid to client "+c.uuid.String())
-	channelCall := webrtc.ChannelCall{
+
+	channelCall := ChannelCall{
 		UUID: c.uuid.String(),
 	}
 	err = c.writeCallUUID(channelCall)
