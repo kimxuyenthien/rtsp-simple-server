@@ -800,7 +800,7 @@ func (c *webRTCConn) genICEServers() []webrtc.ICEServer {
 	return ret
 }
 
-func (c *webRTCConn) writeCallUUID(uuid webrtc.ChannelCall) error {
+func (c *webRTCConn) writeCallUUID(uuid ChannelCall) error {
 	enc, _ := json.Marshal(uuid)
 	return c.wsconn.WriteMessage(websocket.TextMessage, enc)
 }
