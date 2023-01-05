@@ -311,6 +311,9 @@ outer:
 }
 
 func (s *webRTCServer) onRequest(ctx *gin.Context) {
+
+	s.log(logger.Info, "[HIEUTD] onRequest")
+
 	ctx.Writer.Header().Set("Access-Control-Allow-Origin", s.allowOrigin)
 	ctx.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 
@@ -321,14 +324,17 @@ func (s *webRTCServer) onRequest(ctx *gin.Context) {
 		ctx.Writer.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 		ctx.Writer.Header().Set("Access-Control-Allow-Headers", ctx.Request.Header.Get("Access-Control-Request-Headers"))
 		ctx.Writer.WriteHeader(http.StatusOK)
+		s.log(logger.Info, "[HIEUTD] return OPTIONS method")
 		return
 
 	default:
+		s.log(logger.Info, "[HIEUTD] return default method")
 		return
 	}
 
 	// remove leading prefix
 	pa := ctx.Request.URL.Path[1:]
+	s.log(logger.Info, "[HIEUTD] pa = '%s'", pa)
 
 	switch pa {
 	case "", "favicon.ico":
@@ -339,17 +345,20 @@ func (s *webRTCServer) onRequest(ctx *gin.Context) {
 		if strings.HasSuffix(pa, "/ws") {
 			return gopath.Dir(pa), gopath.Base(pa)
 		}
+		s.log(logger.Info, "[HIEUTD] return hasSuffix, '%s'", pa)
 		return pa, ""
 	}()
 
 	if fname == "" && !strings.HasSuffix(dir, "/") {
 		ctx.Writer.Header().Set("Location", "/"+dir+"/")
 		ctx.Writer.WriteHeader(http.StatusMovedPermanently)
+		s.log(logger.Info, "[HIEUTD] return statusMovedPermanently")
 		return
 	}
 
 	dir = strings.TrimSuffix(dir, "/")
 
+	s.log(logger.Info, "[HIEUTD] dir = '%s'", dir)
 	res := s.pathManager.describe(pathDescribeReq{
 		pathName: dir,
 	})
@@ -358,27 +367,32 @@ func (s *webRTCServer) onRequest(ctx *gin.Context) {
 		return
 	}
 
+	s.log(logger.Info, "[HIEUTD] authenticate = '%s'", res.path)
 	err := s.authenticate(res.path, ctx)
 	if err != nil {
 		if terr, ok := err.(pathErrAuthCritical); ok {
 			s.log(logger.Info, "authentication error: %s", terr.message)
 			ctx.Writer.Header().Set("WWW-Authenticate", `Basic realm="rtsp-simple-server"`)
 			ctx.Writer.WriteHeader(http.StatusUnauthorized)
+			s.log(logger.Info, "[HIEUTD] return authentication '%s'", res.path)
 			return
 		}
 
 		ctx.Writer.Header().Set("WWW-Authenticate", `Basic realm="rtsp-simple-server"`)
 		ctx.Writer.WriteHeader(http.StatusUnauthorized)
+		s.log(logger.Info, "[HIEUTD] return authentication, WWW-Authenticate '%s'", res.path)
 		return
 	}
 
 	switch fname {
 	case "":
+
 		ctx.Writer.Header().Set("Content-Type", "text/html")
 		ctx.Writer.Write(webrtcIndex)
 		return
 
 	case "ws":
+		s.log(logger.Info, "[HIEUTD] upgrade to websocket")
 		wsconn, err := upgrader.Upgrade(ctx.Writer, ctx.Request, nil)
 		if err != nil {
 			return
