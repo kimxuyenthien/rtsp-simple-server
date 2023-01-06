@@ -367,32 +367,34 @@ func (s *webRTCServer) onRequest(ctx *gin.Context) {
 		return
 	}
 
-	s.log(logger.Info, "[HIEUTD] authenticate = '%s'", res.path)
-	err := s.authenticate(res.path, ctx)
-	if err != nil {
-		if terr, ok := err.(pathErrAuthCritical); ok {
-			s.log(logger.Info, "authentication error: %s", terr.message)
+	/*
+		s.log(logger.Info, "[HIEUTD] authenticate = '%s'", res.path)
+		err := s.authenticate(res.path, ctx)
+		if err != nil {
+			if terr, ok := err.(pathErrAuthCritical); ok {
+				s.log(logger.Info, "authentication error: %s", terr.message)
+				ctx.Writer.Header().Set("WWW-Authenticate", `Basic realm="rtsp-simple-server"`)
+				ctx.Writer.WriteHeader(http.StatusUnauthorized)
+				s.log(logger.Info, "[HIEUTD] return authentication '%s'", res.path)
+				return
+			}
+
 			ctx.Writer.Header().Set("WWW-Authenticate", `Basic realm="rtsp-simple-server"`)
 			ctx.Writer.WriteHeader(http.StatusUnauthorized)
-			s.log(logger.Info, "[HIEUTD] return authentication '%s'", res.path)
+			s.log(logger.Info, "[HIEUTD] return authentication, WWW-Authenticate '%s'", res.path)
 			return
 		}
-
-		ctx.Writer.Header().Set("WWW-Authenticate", `Basic realm="rtsp-simple-server"`)
-		ctx.Writer.WriteHeader(http.StatusUnauthorized)
-		s.log(logger.Info, "[HIEUTD] return authentication, WWW-Authenticate '%s'", res.path)
-		return
-	}
+	*/
 
 	switch fname {
 	case "":
-
+		s.log(logger.Info, "[HIEUTD] webrtc index")
 		ctx.Writer.Header().Set("Content-Type", "text/html")
 		ctx.Writer.Write(webrtcIndex)
 		return
 
 	case "ws":
-		s.log(logger.Info, "[HIEUTD] upgrade to websocket")
+
 		wsconn, err := upgrader.Upgrade(ctx.Writer, ctx.Request, nil)
 		if err != nil {
 			return

@@ -35,6 +35,10 @@ class Receiver {
 
 	start() {
 		console.log("connecting");
+        let data = {
+            accessToken : "eyJhbGciOiJIUzI1NiJ9.eyJqdGkiOiIzMDIiLCJpYXQiOjE2NzI3OTk1MDYsInN1YiI6IntcImFjY291bnRJZFwiOjMwMixcImFwcElkXCI6XCIwMDQ2NTQ4YmRlZmEwYTBlZDA0YmE4a3NpZDk4N29saFwiLFwibmFtZXNwYWNlXCI6XCJuY2ItYmFuay52blwiLFwic2NvcGVzXCI6XCJjYW1lcmFfbWFuYWdlbWVudFwiLFwidXNlcm5hbWVcIjpcIjA5NDMxODU2OTZcIn0iLCJpc3MiOiIwOTQzMTg1Njk2IiwiZXhwIjoxNjc1MzkxNTA2fQ.sY1cKEhC6uuzmpUqFgNhshoPXsHNBZDbXKVlx1nYm0w"
+        }
+        this.ws.send(JSON.stringify(data));
 
         this.ws = new WebSocket(window.location.href.replace(/^http/, "ws") + 'ws');
         
