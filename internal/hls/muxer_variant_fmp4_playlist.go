@@ -71,7 +71,7 @@ type muxerVariantFMP4Playlist struct {
 	lowLatency   bool
 	segmentCount int
 	videoTrack   format.Format
-	audioTrack   *format.MPEG4Audio
+	audioTrack   format.Format
 
 	mutex              sync.Mutex
 	cond               *sync.Cond
@@ -90,7 +90,7 @@ func newMuxerVariantFMP4Playlist(
 	lowLatency bool,
 	segmentCount int,
 	videoTrack format.Format,
-	audioTrack *format.MPEG4Audio,
+	audioTrack format.Format,
 ) *muxerVariantFMP4Playlist {
 	p := &muxerVariantFMP4Playlist{
 		lowLatency:     lowLatency,
@@ -215,7 +215,7 @@ func (p *muxerVariantFMP4Playlist) playlistReader(msn string, part string, skip 
 			}
 
 			if p.closed {
-				return &MuxerFileResponse{Status: http.StatusInternalServerError}
+				return &MuxerFileResponse{Status: http.StatusNotFound}
 			}
 
 			return &MuxerFileResponse{
@@ -241,7 +241,7 @@ func (p *muxerVariantFMP4Playlist) playlistReader(msn string, part string, skip 
 	}
 
 	if p.closed {
-		return &MuxerFileResponse{Status: http.StatusInternalServerError}
+		return &MuxerFileResponse{Status: http.StatusNotFound}
 	}
 
 	return &MuxerFileResponse{
@@ -416,7 +416,7 @@ func (p *muxerVariantFMP4Playlist) segmentReader(fname string) *MuxerFileRespons
 			}
 
 			if p.closed {
-				return &MuxerFileResponse{Status: http.StatusInternalServerError}
+				return &MuxerFileResponse{Status: http.StatusNotFound}
 			}
 
 			return &MuxerFileResponse{

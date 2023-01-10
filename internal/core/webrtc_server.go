@@ -14,28 +14,25 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
 	"github.com/pion/ice/v2"
 	"github.com/pion/webrtc/v3"
 
 	"github.com/aler9/rtsp-simple-server/internal/conf"
 	"github.com/aler9/rtsp-simple-server/internal/logger"
+	"github.com/aler9/rtsp-simple-server/internal/websocket"
 )
 
 //go:embed webrtc_index.html
 var webrtcIndex []byte
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
-}
-
 type webRTCServerAPIConnsListItem struct {
-	Created       time.Time `json:"created"`
-	RemoteAddr    string    `json:"remoteAddr"`
-	BytesReceived uint64    `json:"bytesReceived"`
-	BytesSent     uint64    `json:"bytesSent"`
+	Created                   time.Time `json:"created"`
+	RemoteAddr                string    `json:"remoteAddr"`
+	PeerConnectionEstablished bool      `json:"peerConnectionEstablished"`
+	LocalCandidate            string    `json:"localCandidate"`
+	RemoteCandidate           string    `json:"remoteCandidate"`
+	BytesReceived             uint64    `json:"bytesReceived"`
+	BytesSent                 uint64    `json:"bytesSent"`
 }
 
 type webRTCServerAPIConnsListData struct {
@@ -62,7 +59,8 @@ type webRTCServerAPIConnsKickReq struct {
 
 type webRTCConnNewReq struct {
 	pathName string
-	wsconn   *websocket.Conn
+	wsconn   *websocket.ServerConn
+	res      chan *webRTCConn
 }
 
 type webRTCServerParent interface {
@@ -81,7 +79,6 @@ type webRTCServer struct {
 
 	ctx               context.Context
 	ctxCancel         func()
-	wg                sync.WaitGroup
 	ln                net.Listener
 	udpMuxLn          net.PacketConn
 	tcpMuxLn          net.Listener
@@ -96,6 +93,9 @@ type webRTCServer struct {
 	chConnClose    chan *webRTCConn
 	chAPIConnsList chan webRTCServerAPIConnsListReq
 	chAPIConnsKick chan webRTCServerAPIConnsKickReq
+
+	// out
+	done chan struct{}
 }
 
 func newWebRTCServer(
@@ -179,6 +179,7 @@ func newWebRTCServer(
 		chConnClose:               make(chan *webRTCConn),
 		chAPIConnsList:            make(chan webRTCServerAPIConnsListReq),
 		chAPIConnsKick:            make(chan webRTCServerAPIConnsKickReq),
+		done:                      make(chan struct{}),
 	}
 
 	str := "listener opened on " + address + " (HTTP)"
@@ -194,7 +195,6 @@ func newWebRTCServer(
 		s.metrics.webRTCServerSet(s)
 	}
 
-	s.wg.Add(1)
 	go s.run()
 
 	return s, nil
@@ -208,14 +208,17 @@ func (s *webRTCServer) log(level logger.Level, format string, args ...interface{
 func (s *webRTCServer) close() {
 	s.log(logger.Info, "listener is closing")
 	s.ctxCancel()
-	s.wg.Wait()
+	<-s.done
 }
 
 func (s *webRTCServer) run() {
-	defer s.wg.Done()
+	defer close(s.done)
+
+	rp := newHTTPRequestPool()
+	defer rp.close()
 
 	router := gin.New()
-	router.NoRoute(httpLoggerMiddleware(s), s.onRequest)
+	router.NoRoute(rp.mw, httpLoggerMiddleware(s), s.onRequest)
 
 	tmp := make([]string, len(s.trustedProxies))
 	for i, entry := range s.trustedProxies {
@@ -235,6 +238,8 @@ func (s *webRTCServer) run() {
 		go hs.Serve(s.ln)
 	}
 
+	var wg sync.WaitGroup
+
 outer:
 	for {
 		select {
@@ -245,7 +250,7 @@ outer:
 				req.pathName,
 				req.wsconn,
 				s.stunServers,
-				&s.wg,
+				&wg,
 				s.pathManager,
 				s,
 				s.iceHostNAT1To1IPs,
@@ -254,6 +259,7 @@ outer:
 			)
 			s.log(logger.Info, "[HIEUTD] uuid : '%s'", c.uuid.String())
 			s.conns[c] = struct{}{}
+			req.res <- c
 
 		case conn := <-s.chConnClose:
 			delete(s.conns, conn)
@@ -265,10 +271,13 @@ outer:
 
 			for c := range s.conns {
 				data.Items[c.uuid.String()] = webRTCServerAPIConnsListItem{
-					Created:       c.created,
-					RemoteAddr:    c.remoteAddr().String(),
-					BytesReceived: c.bytesReceived(),
-					BytesSent:     c.bytesSent(),
+					Created:                   c.created,
+					RemoteAddr:                c.remoteAddr().String(),
+					PeerConnectionEstablished: c.peerConnectionEstablished(),
+					LocalCandidate:            c.localCandidate(),
+					RemoteCandidate:           c.remoteCandidate(),
+					BytesReceived:             c.bytesReceived(),
+					BytesSent:                 c.bytesSent(),
 				}
 			}
 
@@ -300,6 +309,8 @@ outer:
 
 	hs.Shutdown(context.Background())
 	s.ln.Close() // in case Shutdown() is called before Serve()
+
+	wg.Wait()
 
 	if s.udpMuxLn != nil {
 		s.udpMuxLn.Close()
@@ -390,23 +401,38 @@ func (s *webRTCServer) onRequest(ctx *gin.Context) {
 	case "":
 		s.log(logger.Info, "[HIEUTD] webrtc index")
 		ctx.Writer.Header().Set("Content-Type", "text/html")
+		ctx.Writer.WriteHeader(http.StatusOK)
 		ctx.Writer.Write(webrtcIndex)
 		return
 
 	case "ws":
-
-		wsconn, err := upgrader.Upgrade(ctx.Writer, ctx.Request, nil)
+		wsconn, err := websocket.NewServerConn(ctx.Writer, ctx.Request)
 		if err != nil {
 			return
 		}
+		defer wsconn.Close()
 
-		select {
-		case s.connNew <- webRTCConnNewReq{
-			pathName: dir,
-			wsconn:   wsconn,
-		}:
-		case <-s.ctx.Done():
+		c := s.newConn(dir, wsconn)
+		if c == nil {
+			return
 		}
+
+		c.wait()
+	}
+}
+
+func (s *webRTCServer) newConn(dir string, wsconn *websocket.ServerConn) *webRTCConn {
+	req := webRTCConnNewReq{
+		pathName: dir,
+		wsconn:   wsconn,
+		res:      make(chan *webRTCConn),
+	}
+
+	select {
+	case s.connNew <- req:
+		return <-req.res
+	case <-s.ctx.Done():
+		return nil
 	}
 }
 

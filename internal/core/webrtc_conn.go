@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -15,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aler9/gortsplib/v2/pkg/codecs/h264"
 	"github.com/aler9/gortsplib/v2/pkg/format"
 	"github.com/aler9/gortsplib/v2/pkg/formatdecenc/rtph264"
 	"github.com/aler9/gortsplib/v2/pkg/formatdecenc/rtpvp8"
@@ -23,13 +21,14 @@ import (
 	"github.com/aler9/gortsplib/v2/pkg/media"
 	"github.com/aler9/gortsplib/v2/pkg/ringbuffer"
 	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
 	"github.com/pion/ice/v2"
 	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v3"
 
 	"github.com/aler9/rtsp-simple-server/internal/conf"
+	"github.com/aler9/rtsp-simple-server/internal/formatprocessor"
 	"github.com/aler9/rtsp-simple-server/internal/logger"
+	"github.com/aler9/rtsp-simple-server/internal/websocket"
 )
 
 type ChannelCall struct {
@@ -37,7 +36,9 @@ type ChannelCall struct {
 }
 
 const (
-	handshakeDeadline = 10 * time.Second
+	webrtcHandshakeDeadline = 10 * time.Second
+	webrtcWsWriteDeadline   = 2 * time.Second
+	webrtcPayloadMaxSize    = 1188 // 1200 - 12 (RTP header)
 )
 
 // newPeerConnection creates a PeerConnection with the default codecs and
@@ -65,42 +66,11 @@ func newPeerConnection(configuration webrtc.Configuration,
 	return api.NewPeerConnection(configuration)
 }
 
-func describeActiveCandidates(pc *webrtc.PeerConnection) (string, string) {
-	var lcid string
-	var rcid string
-
-	for _, stats := range pc.GetStats() {
-		if tstats, ok := stats.(webrtc.ICECandidatePairStats); ok && tstats.Nominated {
-			lcid = tstats.LocalCandidateID
-			rcid = tstats.RemoteCandidateID
-			break
-		}
-	}
-
-	var ldesc string
-	var rdesc string
-
-	for _, stats := range pc.GetStats() {
-		if tstats, ok := stats.(webrtc.ICECandidateStats); ok {
-			str := tstats.CandidateType.String() + "/" + tstats.Protocol + "/" +
-				tstats.IP + "/" + strconv.FormatInt(int64(tstats.Port), 10)
-
-			if tstats.ID == lcid {
-				ldesc = str
-			} else if tstats.ID == rcid {
-				rdesc = str
-			}
-		}
-	}
-
-	return ldesc, rdesc
-}
-
 type webRTCTrack struct {
 	media       *media.Media
 	format      format.Format
 	webRTCTrack *webrtc.TrackLocalStaticRTP
-	cb          func(data, context.Context, chan error)
+	cb          func(formatprocessor.Data, context.Context, chan error)
 }
 
 func gatherMedias(tracks []*webRTCTrack) media.Medias {
@@ -125,7 +95,7 @@ type webRTCConnParent interface {
 type webRTCConn struct {
 	readBufferCount   int
 	pathName          string
-	wsconn            *websocket.Conn
+	wsconn            *websocket.ServerConn
 	iceServers        []string
 	wg                *sync.WaitGroup
 	pathManager       webRTCConnPathManager
@@ -140,13 +110,15 @@ type webRTCConn struct {
 	created   time.Time
 	curPC     *webrtc.PeerConnection
 	mutex     sync.RWMutex
+
+	closed chan struct{}
 }
 
 func newWebRTCConn(
 	parentCtx context.Context,
 	readBufferCount int,
 	pathName string,
-	wsconn *websocket.Conn,
+	wsconn *websocket.ServerConn,
 	iceServers []string,
 	wg *sync.WaitGroup,
 	pathManager webRTCConnPathManager,
@@ -172,6 +144,7 @@ func newWebRTCConn(
 		iceUDPMux:         iceUDPMux,
 		iceTCPMux:         iceTCPMux,
 		iceHostNAT1To1IPs: iceHostNAT1To1IPs,
+		closed:            make(chan struct{}),
 	}
 
 	c.log(logger.Info, "opened")
@@ -186,17 +159,81 @@ func (c *webRTCConn) close() {
 	c.ctxCancel()
 }
 
+func (c *webRTCConn) wait() {
+	<-c.closed
+}
+
 func (c *webRTCConn) remoteAddr() net.Addr {
 	return c.wsconn.RemoteAddr()
+}
+
+func (c *webRTCConn) peerConnectionEstablished() bool {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
+	return c.curPC != nil
+}
+
+func (c *webRTCConn) localCandidate() string {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
+	if c.curPC != nil {
+		var cid string
+		for _, stats := range c.curPC.GetStats() {
+			if tstats, ok := stats.(webrtc.ICECandidatePairStats); ok && tstats.Nominated {
+				cid = tstats.LocalCandidateID
+				break
+			}
+		}
+
+		if cid != "" {
+			for _, stats := range c.curPC.GetStats() {
+				if tstats, ok := stats.(webrtc.ICECandidateStats); ok && tstats.ID == cid {
+					return tstats.CandidateType.String() + "/" + tstats.Protocol + "/" +
+						tstats.IP + "/" + strconv.FormatInt(int64(tstats.Port), 10)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (c *webRTCConn) remoteCandidate() string {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
+	if c.curPC != nil {
+		var cid string
+		for _, stats := range c.curPC.GetStats() {
+			if tstats, ok := stats.(webrtc.ICECandidatePairStats); ok && tstats.Nominated {
+				cid = tstats.RemoteCandidateID
+				break
+			}
+		}
+
+		if cid != "" {
+			for _, stats := range c.curPC.GetStats() {
+				if tstats, ok := stats.(webrtc.ICECandidateStats); ok && tstats.ID == cid {
+					return tstats.CandidateType.String() + "/" + tstats.Protocol + "/" +
+						tstats.IP + "/" + strconv.FormatInt(int64(tstats.Port), 10)
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func (c *webRTCConn) bytesReceived() uint64 {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	for _, stats := range c.curPC.GetStats() {
-		if tstats, ok := stats.(webrtc.TransportStats); ok {
-			if tstats.ID == "iceTransport" {
-				return tstats.BytesReceived
+
+	if c.curPC != nil {
+		for _, stats := range c.curPC.GetStats() {
+			if tstats, ok := stats.(webrtc.TransportStats); ok {
+				if tstats.ID == "iceTransport" {
+					return tstats.BytesReceived
+				}
 			}
 		}
 	}
@@ -206,10 +243,13 @@ func (c *webRTCConn) bytesReceived() uint64 {
 func (c *webRTCConn) bytesSent() uint64 {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	for _, stats := range c.curPC.GetStats() {
-		if tstats, ok := stats.(webrtc.TransportStats); ok {
-			if tstats.ID == "iceTransport" {
-				return tstats.BytesSent
+
+	if c.curPC != nil {
+		for _, stats := range c.curPC.GetStats() {
+			if tstats, ok := stats.(webrtc.TransportStats); ok {
+				if tstats.ID == "iceTransport" {
+					return tstats.BytesSent
+				}
 			}
 		}
 	}
@@ -221,6 +261,7 @@ func (c *webRTCConn) log(level logger.Level, format string, args ...interface{})
 }
 
 func (c *webRTCConn) run() {
+	defer close(c.closed)
 	defer c.wg.Done()
 
 	innerCtx, innerCtxCancel := context.WithCancel(c.ctx)
@@ -248,11 +289,6 @@ func (c *webRTCConn) run() {
 }
 
 func (c *webRTCConn) runInner(ctx context.Context) error {
-	go func() {
-		<-ctx.Done()
-		c.wsconn.Close()
-	}()
-
 	res := c.pathManager.readerAdd(pathReaderAddReq{
 		author:   c,
 		pathName: c.pathName,
@@ -279,21 +315,7 @@ func (c *webRTCConn) runInner(ctx context.Context) error {
 		return err
 	}
 
-	// maximum deadline to complete the handshake
-	c.wsconn.SetReadDeadline(time.Now().Add(handshakeDeadline))
-	c.wsconn.SetWriteDeadline(time.Now().Add(handshakeDeadline))
-
-	c.log(logger.Info, "[HIEUTD] Send channel uuid to client "+c.uuid.String())
-
-	channelCall := ChannelCall{
-		UUID: c.uuid.String(),
-	}
-	err = c.writeCallUUID(channelCall)
-	if err != nil {
-		return err
-	}
-
-	err = c.writeICEServers(c.genICEServers())
+	err = c.wsconn.WriteJSON(c.genICEServers())
 	if err != nil {
 		return err
 	}
@@ -323,11 +345,36 @@ func (c *webRTCConn) runInner(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer pc.Close()
 
-	c.mutex.Lock()
-	c.curPC = pc
-	c.mutex.Unlock()
+	pcConnected := make(chan struct{})
+	pcDisconnected := make(chan struct{})
+	pcClosed := make(chan struct{})
+
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		select {
+		case <-pcClosed:
+			return
+		default:
+		}
+
+		c.log(logger.Debug, "peer connection state: "+state.String())
+
+		switch state {
+		case webrtc.PeerConnectionStateConnected:
+			close(pcConnected)
+
+		case webrtc.PeerConnectionStateDisconnected:
+			close(pcDisconnected)
+
+		case webrtc.PeerConnectionStateClosed:
+			close(pcClosed)
+		}
+	})
+
+	defer func() {
+		pc.Close()
+		<-pcClosed
+	}()
 
 	for _, track := range tracks {
 		rtpSender, err := pc.AddTrack(track.webRTCTrack)
@@ -347,32 +394,18 @@ func (c *webRTCConn) runInner(ctx context.Context) error {
 		}()
 	}
 
-	localCandidate := make(chan *webrtc.ICECandidate)
-	pcConnected := make(chan struct{})
-	pcDisconnected := make(chan struct{})
+	localCandidate := make(chan *webrtc.ICECandidateInit)
 
 	pc.OnICECandidate(func(i *webrtc.ICECandidate) {
 		if i != nil {
+			v := i.ToJSON()
 			select {
-			case localCandidate <- i:
+			case localCandidate <- &v:
 			case <-pcConnected:
 			case <-ctx.Done():
 			}
 		}
 	})
-
-	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		c.log(logger.Debug, "peer connection state: "+state.String())
-
-		switch state {
-		case webrtc.PeerConnectionStateConnected:
-			close(pcConnected)
-
-		case webrtc.PeerConnectionStateDisconnected:
-			close(pcDisconnected)
-		}
-	})
-
 	err = pc.SetRemoteDescription(*offer)
 	if err != nil {
 		return err
@@ -388,12 +421,12 @@ func (c *webRTCConn) runInner(ctx context.Context) error {
 		return err
 	}
 
-	err = c.writeAnswer(&answer)
+	err = c.wsconn.WriteJSON(&answer)
 	if err != nil {
 		return err
 	}
 
-	readError := make(chan error)
+	wsReadError := make(chan error)
 	remoteCandidate := make(chan *webrtc.ICECandidateInit)
 
 	go func() {
@@ -401,8 +434,7 @@ func (c *webRTCConn) runInner(ctx context.Context) error {
 			candidate, err := c.readCandidate()
 			if err != nil {
 				select {
-				case readError <- err:
-				case <-pcConnected:
+				case wsReadError <- err:
 				case <-ctx.Done():
 				}
 				return
@@ -416,22 +448,31 @@ func (c *webRTCConn) runInner(ctx context.Context) error {
 		}
 	}()
 
+	t := time.NewTimer(webrtcHandshakeDeadline)
+	defer t.Stop()
+
 outer:
 	for {
 		select {
 		case candidate := <-localCandidate:
-			c.log(logger.Debug, "local candidate: %+v", candidate)
-			c.writeCandidate(candidate)
-
-		case candidate := <-remoteCandidate:
-			c.log(logger.Debug, "remote candidate: %+v", candidate.Candidate)
-			err = pc.AddICECandidate(*candidate)
+			c.log(logger.Debug, "local candidate: %+v", candidate.Candidate)
+			err := c.wsconn.WriteJSON(candidate)
 			if err != nil {
 				return err
 			}
 
-		case err := <-readError:
+		case candidate := <-remoteCandidate:
+			c.log(logger.Debug, "remote candidate: %+v", candidate.Candidate)
+			err := pc.AddICECandidate(*candidate)
+			if err != nil {
+				return err
+			}
+
+		case err := <-wsReadError:
 			return err
+
+		case <-t.C:
+			return fmt.Errorf("deadline exceeded")
 
 		case <-pcConnected:
 			break outer
@@ -441,12 +482,18 @@ outer:
 		}
 	}
 
-	// do NOT close the WebSocket connection
-	// in order to allow the other side of the connection
-	// o switch to the "connected" state before WebSocket is closed.
+	// Keep WebSocket connection open and use it to notify shutdowns.
+	// This is because pion/webrtc doesn't write yet a WebRTC shutdown
+	// message to clients (like a DTLS close alert or a RTCP BYE),
+	// therefore browsers do not properly detect shutdowns and do not
+	// attempt to restart the connection immediately.
 
-	ldesc, rdesc := describeActiveCandidates(pc)
-	c.log(logger.Info, "peer connection established, local candidate: %v, remote candidate: %v", ldesc, rdesc)
+	c.mutex.Lock()
+	c.curPC = pc
+	c.mutex.Unlock()
+
+	c.log(logger.Info, "peer connection established, local candidate: %v, remote candidate: %v",
+		c.localCandidate(), c.remoteCandidate())
 
 	ringBuffer, _ := ringbuffer.New(uint64(c.readBufferCount))
 	defer ringBuffer.Close()
@@ -455,7 +502,7 @@ outer:
 
 	for _, track := range tracks {
 		ctrack := track
-		res.stream.readerAdd(c, track.media, track.format, func(dat data) {
+		res.stream.readerAdd(c, track.media, track.format, func(dat formatprocessor.Data) {
 			ringBuffer.Push(func() {
 				ctrack.cb(dat, ctx, writeError)
 			})
@@ -479,6 +526,9 @@ outer:
 	select {
 	case <-pcDisconnected:
 		return fmt.Errorf("peer connection closed")
+
+	case err := <-wsReadError:
+		return fmt.Errorf("websocket error: %v", err)
 
 	case err := <-writeError:
 		return err
@@ -509,7 +559,7 @@ func (c *webRTCConn) allocateTracks(medias media.Medias) ([]*webRTCTrack, error)
 
 		encoder := &rtpvp9.Encoder{
 			PayloadType:    96,
-			PayloadMaxSize: 1200,
+			PayloadMaxSize: webrtcPayloadMaxSize,
 		}
 		encoder.Init()
 
@@ -517,14 +567,14 @@ func (c *webRTCConn) allocateTracks(medias media.Medias) ([]*webRTCTrack, error)
 			media:       vp9Media,
 			format:      vp9Format,
 			webRTCTrack: webRTCTrak,
-			cb: func(dat data, ctx context.Context, writeError chan error) {
-				tdata := dat.(*dataVP9)
+			cb: func(dat formatprocessor.Data, ctx context.Context, writeError chan error) {
+				tdata := dat.(*formatprocessor.DataVP9)
 
-				if tdata.frame == nil {
+				if tdata.Frame == nil {
 					return
 				}
 
-				packets, err := encoder.Encode(tdata.frame, tdata.pts)
+				packets, err := encoder.Encode(tdata.Frame, tdata.PTS)
 				if err != nil {
 					return
 				}
@@ -556,7 +606,7 @@ func (c *webRTCConn) allocateTracks(medias media.Medias) ([]*webRTCTrack, error)
 
 			encoder := &rtpvp8.Encoder{
 				PayloadType:    96,
-				PayloadMaxSize: 1200,
+				PayloadMaxSize: webrtcPayloadMaxSize,
 			}
 			encoder.Init()
 
@@ -564,14 +614,14 @@ func (c *webRTCConn) allocateTracks(medias media.Medias) ([]*webRTCTrack, error)
 				media:       vp8Media,
 				format:      vp8Format,
 				webRTCTrack: webRTCTrak,
-				cb: func(dat data, ctx context.Context, writeError chan error) {
-					tdata := dat.(*dataVP8)
+				cb: func(dat formatprocessor.Data, ctx context.Context, writeError chan error) {
+					tdata := dat.(*formatprocessor.DataVP8)
 
-					if tdata.frame == nil {
+					if tdata.Frame == nil {
 						return
 					}
 
-					packets, err := encoder.Encode(tdata.frame, tdata.pts)
+					packets, err := encoder.Encode(tdata.Frame, tdata.PTS)
 					if err != nil {
 						return
 					}
@@ -603,7 +653,7 @@ func (c *webRTCConn) allocateTracks(medias media.Medias) ([]*webRTCTrack, error)
 
 			encoder := &rtph264.Encoder{
 				PayloadType:    96,
-				PayloadMaxSize: 1200,
+				PayloadMaxSize: webrtcPayloadMaxSize,
 			}
 			encoder.Init()
 
@@ -614,32 +664,28 @@ func (c *webRTCConn) allocateTracks(medias media.Medias) ([]*webRTCTrack, error)
 				media:       h264Media,
 				format:      h264Format,
 				webRTCTrack: webRTCTrak,
-				cb: func(dat data, ctx context.Context, writeError chan error) {
-					tdata := dat.(*dataH264)
+				cb: func(dat formatprocessor.Data, ctx context.Context, writeError chan error) {
+					tdata := dat.(*formatprocessor.DataH264)
 
-					if tdata.au == nil {
+					if tdata.AU == nil {
 						return
 					}
 
 					if !firstNALUReceived {
-						if !h264.IDRPresent(tdata.au) {
-							return
-						}
-
 						firstNALUReceived = true
-						lastPTS = tdata.pts
+						lastPTS = tdata.PTS
 					} else {
-						if tdata.pts < lastPTS {
+						if tdata.PTS < lastPTS {
 							select {
 							case writeError <- fmt.Errorf("WebRTC doesn't support H264 streams with B-frames"):
 							case <-ctx.Done():
 							}
 							return
 						}
-						lastPTS = tdata.pts
+						lastPTS = tdata.PTS
 					}
 
-					packets, err := encoder.Encode(tdata.au, tdata.pts)
+					packets, err := encoder.Encode(tdata.AU, tdata.PTS)
 					if err != nil {
 						return
 					}
@@ -672,8 +718,8 @@ func (c *webRTCConn) allocateTracks(medias media.Medias) ([]*webRTCTrack, error)
 			media:       opusMedia,
 			format:      opusFormat,
 			webRTCTrack: webRTCTrak,
-			cb: func(dat data, ctx context.Context, writeError chan error) {
-				for _, pkt := range dat.getRTPPackets() {
+			cb: func(dat formatprocessor.Data, ctx context.Context, writeError chan error) {
+				for _, pkt := range dat.GetRTPPackets() {
 					webRTCTrak.WriteRTP(pkt)
 				}
 			},
@@ -702,8 +748,8 @@ func (c *webRTCConn) allocateTracks(medias media.Medias) ([]*webRTCTrack, error)
 				media:       g722Media,
 				format:      g722Format,
 				webRTCTrack: webRTCTrak,
-				cb: func(dat data, ctx context.Context, writeError chan error) {
-					for _, pkt := range dat.getRTPPackets() {
+				cb: func(dat formatprocessor.Data, ctx context.Context, writeError chan error) {
+					for _, pkt := range dat.GetRTPPackets() {
 						webRTCTrak.WriteRTP(pkt)
 					}
 				},
@@ -740,8 +786,8 @@ func (c *webRTCConn) allocateTracks(medias media.Medias) ([]*webRTCTrack, error)
 				media:       g711Media,
 				format:      g711Format,
 				webRTCTrack: webRTCTrak,
-				cb: func(dat data, ctx context.Context, writeError chan error) {
-					for _, pkt := range dat.getRTPPackets() {
+				cb: func(dat formatprocessor.Data, ctx context.Context, writeError chan error) {
+					for _, pkt := range dat.GetRTPPackets() {
 						webRTCTrak.WriteRTP(pkt)
 					}
 				},
@@ -800,24 +846,9 @@ func (c *webRTCConn) genICEServers() []webrtc.ICEServer {
 	return ret
 }
 
-func (c *webRTCConn) writeCallUUID(uuid ChannelCall) error {
-	enc, _ := json.Marshal(uuid)
-	return c.wsconn.WriteMessage(websocket.TextMessage, enc)
-}
-
-func (c *webRTCConn) writeICEServers(iceServers []webrtc.ICEServer) error {
-	enc, _ := json.Marshal(iceServers)
-	return c.wsconn.WriteMessage(websocket.TextMessage, enc)
-}
-
 func (c *webRTCConn) readOffer() (*webrtc.SessionDescription, error) {
-	_, enc, err := c.wsconn.ReadMessage()
-	if err != nil {
-		return nil, err
-	}
-
 	var offer webrtc.SessionDescription
-	err = json.Unmarshal(enc, &offer)
+	err := c.wsconn.ReadJSON(&offer)
 	if err != nil {
 		return nil, err
 	}
@@ -829,24 +860,9 @@ func (c *webRTCConn) readOffer() (*webrtc.SessionDescription, error) {
 	return &offer, nil
 }
 
-func (c *webRTCConn) writeAnswer(answer *webrtc.SessionDescription) error {
-	enc, _ := json.Marshal(answer)
-	return c.wsconn.WriteMessage(websocket.TextMessage, enc)
-}
-
-func (c *webRTCConn) writeCandidate(candidate *webrtc.ICECandidate) error {
-	enc, _ := json.Marshal(candidate.ToJSON())
-	return c.wsconn.WriteMessage(websocket.TextMessage, enc)
-}
-
 func (c *webRTCConn) readCandidate() (*webrtc.ICECandidateInit, error) {
-	_, enc, err := c.wsconn.ReadMessage()
-	if err != nil {
-		return nil, err
-	}
-
 	var candidate webrtc.ICECandidateInit
-	err = json.Unmarshal(enc, &candidate)
+	err := c.wsconn.ReadJSON(&candidate)
 	if err != nil {
 		return nil, err
 	}
